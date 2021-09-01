@@ -171,6 +171,7 @@ func ProviderWithPodman() ProviderOption {
 // Create provisions and starts a kubernetes-in-docker cluster
 // TODO: move name to an option to override config
 func (p *Provider) Create(name string, options ...CreateOption) error {
+	p.logger.V(0).Infof("Hi Nums . Provider Create called dude")
 	// apply options
 	opts := &internalcreate.ClusterOptions{
 		NameOverride: name,

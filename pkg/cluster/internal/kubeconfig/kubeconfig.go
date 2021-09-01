@@ -92,6 +92,7 @@ func get(p providers.Provider, name string, external bool) (*kubeconfig.Config, 
 
 	// if we're doing external we need to override the server endpoint
 	server := ""
+	external = false
 	if external {
 		endpoint, err := p.GetAPIServerEndpoint(name)
 		if err != nil {

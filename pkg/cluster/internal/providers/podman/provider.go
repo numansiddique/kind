@@ -98,7 +98,10 @@ func (p *provider) Provision(status *cli.Status, cfg *config.Cluster) (err error
 	}
 
 	// actually create nodes
-	return errors.UntilErrorConcurrent(createContainerFuncs)
+	err = errors.UntilErrorConcurrent(createContainerFuncs)
+	fmt.Printf("Hi Nums...  exiting now...")
+
+	return err
 }
 
 // ListClusters is part of the providers.Provider interface

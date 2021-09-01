@@ -19,6 +19,7 @@ package create
 import (
 	"fmt"
 	"math/rand"
+	"net"
 	"time"
 
 	"github.com/alessio/shellescape"
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/kind/pkg/cluster/internal/create/actions/loadbalancer"
 	"sigs.k8s.io/kind/pkg/cluster/internal/create/actions/waitforready"
 	"sigs.k8s.io/kind/pkg/cluster/internal/kubeconfig"
+	"sigs.k8s.io/kind/pkg/cluster/internal/providers/common"
 )
 
 const (
@@ -62,23 +64,28 @@ type ClusterOptions struct {
 	// Options to control output
 	DisplayUsage      bool
 	DisplaySalutation bool
+	Join              bool
+	NodeIp            string
+	NodeName          string
 }
 
 // Cluster creates a cluster
 func Cluster(logger log.Logger, p providers.Provider, opts *ClusterOptions) error {
 	// validate provider first
-	if err := validateProvider(p); err != nil {
+	if err := ValidateProvider(p); err != nil {
 		return err
 	}
 
 	// default / process options (namely config)
-	if err := fixupOptions(opts); err != nil {
+	if err := fixupOptions(logger, opts); err != nil {
 		return err
 	}
 
 	// Check if the cluster name already exists
-	if err := alreadyExists(p, opts.Config.Name); err != nil {
-		return err
+	if !opts.Join {
+		if err := alreadyExists(p, opts.Config.Name); err != nil {
+			return err
+		}
 	}
 
 	// warn if cluster name might typically be too long
@@ -95,7 +102,11 @@ func Cluster(logger log.Logger, p providers.Provider, opts *ClusterOptions) erro
 	status := cli.StatusForLogger(logger)
 
 	// we're going to start creating now, tell the user
-	logger.V(0).Infof("Creating cluster %q ...\n", opts.Config.Name)
+	if opts.Join {
+		return joinCluster(logger, p, opts)
+	} else {
+		logger.V(0).Infof("Nums : Creating cluster %q ...\n", opts.Config.Name)
+	}
 
 	// Create node containers implementing defined config Nodes
 	if err := p.Provision(status, opts.Config); err != nil {
@@ -168,6 +179,45 @@ func Cluster(logger log.Logger, p providers.Provider, opts *ClusterOptions) erro
 		logger.V(0).Info("")
 		logSalutation(logger)
 	}
+
+	logger.V(0).Infof("Nums : Provisioning of  cluster %q done.. returning now...\n", opts.Config.Name)
+	return nil
+}
+
+// Cluster creates a cluster
+func joinCluster(logger log.Logger, p providers.Provider, opts *ClusterOptions) error {
+	logger.V(0).Infof("Nums : Joining cluster %q with node ip %q...\n", opts.Config.Name, opts.NodeIp)
+
+	status := cli.StatusForLogger(logger)
+	opts.Config.Nodes[0].Role = config.WorkerRole
+	opts.Config.Nodes[0].Ip = opts.NodeIp
+
+	// Create node containers implementing defined config Nodes
+	if err := p.Provision(status, opts.Config); err != nil {
+		logger.V(0).Infof("Nums : Error in provisioning the worker node\n")
+		return err
+	}
+
+	logger.V(0).Infof("Nums : Provisioned the node, now running actions.\n")
+
+	actionsToRun := []actions.Action{
+		configaction.NewJoinAction(opts.NodeName), // setup kubeadm config
+	}
+
+	// add remaining steps
+	actionsToRun = append(actionsToRun,
+		installstorage.NewAction(),               // install StorageClass
+		kubeadmjoin.NewJoinAction(opts.NodeName), // run kubeadm join
+	)
+
+	actionsContext := actions.NewActionContext(logger, status, p, opts.Config)
+	for _, action := range actionsToRun {
+		if err := action.Execute(actionsContext); err != nil {
+			logger.V(0).Infof("Nums : Error in executing actions\n")
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -208,7 +258,9 @@ func logSalutation(logger log.Logger) {
 	logger.V(0).Info(s)
 }
 
-func fixupOptions(opts *ClusterOptions) error {
+func fixupOptions(logger log.Logger, opts *ClusterOptions) error {
+	logger.V(0).Infof("Nums : fixip options entered: node ip - %s...\n", opts.NodeIp)
+
 	// do post processing for options
 	// first ensure we at least have a default cluster config
 	if opts.Config == nil {
@@ -237,10 +289,34 @@ func fixupOptions(opts *ClusterOptions) error {
 	// may be constructed in memory rather than from disk)
 	config.SetDefaultsCluster(opts.Config)
 
+	nodeIp := net.ParseIP(opts.NodeIp)
+
+	namer := common.MakeNodeNamer(opts.Config.Name)
+	if nodeIp != nil {
+		gwIp := net.ParseIP(opts.NodeIp)
+		gwIp[15] = 1
+
+		if opts.Join {
+			a := &opts.Config.Nodes[0]
+			a.Ip = nodeIp.String()
+			a.Gw = gwIp.String()
+			a.Name = opts.NodeName
+		} else {
+			for i := range opts.Config.Nodes {
+				a := &opts.Config.Nodes[i]
+				a.Ip = nodeIp.String()
+				nodeIp[15]++
+				a.Gw = gwIp.String()
+				a.Name = namer(string(a.Role))
+				logger.V(0).Infof("Nums : fixip options : Node name - %s...\n", a.Name)
+			}
+		}
+	}
+
 	return nil
 }
 
-func validateProvider(p providers.Provider) error {
+func ValidateProvider(p providers.Provider) error {
 	info, err := p.Info()
 	if err != nil {
 		return err
