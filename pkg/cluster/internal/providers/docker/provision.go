@@ -83,7 +83,12 @@ func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs
 	// plan normal nodes
 	for i, node := range cfg.Nodes {
 		node := node.DeepCopy() // copy so we can modify
-		name := names[i]
+		var name string
+		if node.Name == "" {
+			name = names[i]
+		} else {
+			name = node.Name
+		}
 
 		// fixup relative paths, docker can only handle absolute paths
 		for m := range node.ExtraMounts {
@@ -112,7 +117,7 @@ func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs
 				if err != nil {
 					return err
 				}
-				return createContainerWithWaitUntilSystemdReachesMultiUserSystem(name, args)
+				return createContainerWithOvsPorts(args, name, node.Ip, node.Gw, node.Mac)
 			})
 		case config.WorkerRole:
 			createContainerFuncs = append(createContainerFuncs, func() error {
@@ -120,13 +125,28 @@ func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs
 				if err != nil {
 					return err
 				}
-				return createContainerWithWaitUntilSystemdReachesMultiUserSystem(name, args)
+				return createContainerWithOvsPorts(args, name, node.Ip, node.Gw, node.Mac)
 			})
 		default:
 			return nil, errors.Errorf("unknown node role: %q", node.Role)
 		}
 	}
 	return createContainerFuncs, nil
+}
+
+func clusterIsIPv6(cfg *config.Cluster) bool {
+	return cfg.Networking.IPFamily == config.IPv6Family || cfg.Networking.IPFamily == config.DualStackFamily
+}
+
+func clusterHasImplicitLoadBalancer(cfg *config.Cluster) bool {
+	controlPlanes := 0
+	for _, configNode := range cfg.Nodes {
+		role := string(configNode.Role)
+		if role == constants.ControlPlaneNodeRoleValue {
+			controlPlanes++
+		}
+	}
+	return controlPlanes > 1
 }
 
 // commonArgs computes static arguments that apply to all containers
@@ -138,7 +158,7 @@ func commonArgs(cluster string, cfg *config.Cluster, networkName string, nodeNam
 		// label the node with the cluster ID
 		"--label", fmt.Sprintf("%s=%s", clusterLabelKey, cluster),
 		// user a user defined docker network so we get embedded DNS
-		"--net", networkName,
+		//"--net", networkName,
 		// Docker supports the following restart modes:
 		// - no
 		// - on-failure[:max-retries]
@@ -226,6 +246,10 @@ func runArgsForNode(node *config.Node, clusterIPFamily config.ClusterIPFamily, n
 		"--volume", "/var",
 		// some k8s things want to read /lib/modules
 		"--volume", "/lib/modules:/lib/modules:ro",
+		"--volume", "/etc/hosts:/etc/hosts:ro",
+		"--volume", "/etc/resolv.conf:/etc/resolv.conf",
+		"--volume", "/etc/security/limits.conf:/etc/security/limits.conf",
+		"--network", "none", // don't attach to any networks
 		// propagate KIND_EXPERIMENTAL_CONTAINERD_SNAPSHOTTER to the entrypoint script
 		"-e", "KIND_EXPERIMENTAL_CONTAINERD_SNAPSHOTTER",
 	},
@@ -405,4 +429,28 @@ func createContainerWithWaitUntilSystemdReachesMultiUserSystem(name string, args
 	logCmd := exec.CommandContext(logCtx, "docker", "logs", "-f", name)
 	defer logCancel()
 	return common.WaitUntilLogRegexpMatches(logCtx, logCmd, common.NodeReachedCgroupsReadyRegexp())
+}
+
+func createContainerWithOvsPorts(args []string, name string, nodeIp string, gwIp string, mac string) error {
+	fmt.Printf("Creating docker container for %s with args - [%s]\n", name, args)
+	if err := exec.Command("podman", append([]string{"run", "--name", name}, args...)...).Run(); err != nil {
+		return err
+	}
+
+	time.Sleep(3 * time.Second)
+	ovsArgs := []string{
+		"add-port",
+		"br-int",
+		"eth0",
+		name,
+		"--ipaddress=" + nodeIp + "/16",
+		"--gateway=" + gwIp,
+		"--macaddress=" + mac,
+	}
+
+	if err := exec.Command("ovs-docker", ovsArgs...).Run(); err != nil {
+		return errors.Wrap(err, "ovs-docker run error")
+	}
+
+	return nil
 }

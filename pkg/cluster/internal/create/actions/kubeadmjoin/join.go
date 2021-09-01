@@ -117,6 +117,7 @@ func joinWorkers(
 
 // runKubeadmJoin executes kubeadm join command
 func runKubeadmJoin(logger log.Logger, node nodes.Node) error {
+	logger.V(0).Infof("Nums : runKubeadmJoin entered dude\n")
 	// run kubeadm join
 	// TODO(bentheelder): this should be using the config file
 	cmd := node.Command(
@@ -133,6 +134,45 @@ func runKubeadmJoin(logger log.Logger, node nodes.Node) error {
 	logger.V(3).Info(strings.Join(lines, "\n"))
 	if err != nil {
 		return errors.Wrap(err, "failed to join node with kubeadm")
+	}
+
+	return nil
+}
+
+type JoinAction struct {
+	NodeName string
+}
+
+// NewAction returns a new action for creating the config files
+func NewJoinAction(nodeName string) actions.Action {
+	return &JoinAction{NodeName: nodeName}
+}
+
+// Execute runs the action
+func (a *JoinAction) Execute(ctx *actions.ActionContext) error {
+	allNodes, err := ctx.Nodes()
+	if err != nil {
+		return err
+	}
+
+	joinNodes := []nodes.Node{}
+	for _, node := range allNodes {
+		if node.String() == a.NodeName {
+			joinNodes = append(joinNodes, node)
+		}
+	}
+
+	allNodes = joinNodes
+
+	// join worker nodes if any
+	workers, err := nodeutils.SelectNodesByRole(allNodes, constants.WorkerNodeRoleValue)
+	if err != nil {
+		return err
+	}
+	if len(workers) > 0 {
+		if err := joinWorkers(ctx, workers); err != nil {
+			return err
+		}
 	}
 
 	return nil
