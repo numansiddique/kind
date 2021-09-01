@@ -21,6 +21,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/kind/pkg/cluster/constants"
 	"sigs.k8s.io/kind/pkg/errors"
@@ -33,6 +34,7 @@ import (
 
 // planCreation creates a slice of funcs that will create the containers
 func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs []func() error, err error) {
+	fmt.Printf("Hi Nums : plan creation\n")
 	// these apply to all container creation
 	nodeNamer := common.MakeNodeNamer(cfg.Name)
 	genericArgs, err := commonArgs(cfg, networkName)
@@ -68,8 +70,13 @@ func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs
 
 	// plan normal nodes
 	for _, node := range cfg.Nodes {
-		node := node.DeepCopy()              // copy so we can modify
-		name := nodeNamer(string(node.Role)) // name the node
+		node := node.DeepCopy() // copy so we can modify
+		var name string
+		if node.Name == "" {
+			name = nodeNamer(string(node.Role)) // name the node
+		} else {
+			name = node.Name
+		}
 
 		// fixup relative paths, podman can only handle absolute paths
 		for i := range node.ExtraMounts {
@@ -96,7 +103,7 @@ func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs
 				if err != nil {
 					return err
 				}
-				return createContainer(args)
+				return createContainerWithOvsPorts(args, name, node.Ip, node.Gw, node.Mac)
 			})
 		case config.WorkerRole:
 			createContainerFuncs = append(createContainerFuncs, func() error {
@@ -104,7 +111,7 @@ func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs
 				if err != nil {
 					return err
 				}
-				return createContainer(args)
+				return createContainerWithOvsPorts(args, name, node.Ip, node.Gw, node.Mac)
 			})
 		default:
 			return nil, errors.Errorf("unknown node role: %q", node.Role)
@@ -117,6 +124,31 @@ func createContainer(args []string) error {
 	if err := exec.Command("podman", args...).Run(); err != nil {
 		return errors.Wrap(err, "podman run error")
 	}
+
+	return nil
+}
+
+func createContainerWithOvsPorts(args []string, name string, nodeIp string, gwIp string, mac string) error {
+	fmt.Printf("Creating podman container for %s with args - [%s]\n", name, args)
+	if err := exec.Command("podman", args...).Run(); err != nil {
+		return errors.Wrap(err, "podman run error")
+	}
+
+	time.Sleep(3 * time.Second)
+	ovsArgs := []string{
+		"add-port",
+		"br-ovn",
+		"eth0",
+		name,
+		"--ipaddress=" + nodeIp + "/16",
+		"--gateway=" + gwIp,
+		"--macaddress=" + mac,
+	}
+
+	if err := exec.Command("ovs-docker", ovsArgs...).Run(); err != nil {
+		return errors.Wrap(err, "ovs-docker run error")
+	}
+
 	return nil
 }
 
@@ -139,9 +171,9 @@ func clusterHasImplicitLoadBalancer(cfg *config.Cluster) bool {
 func commonArgs(cfg *config.Cluster, networkName string) ([]string, error) {
 	// standard arguments all nodes containers need, computed once
 	args := []string{
-		"--detach",           // run the container detached
-		"--tty",              // allocate a tty for entrypoint logs
-		"--net", networkName, // attach to its own network
+		"--detach", // run the container detached
+		"--tty",    // allocate a tty for entrypoint logs
+		//"--net", networkName, // attach to its own network
 		// label the node with the cluster ID
 		"--label", fmt.Sprintf("%s=%s", clusterLabelKey, cfg.Name),
 		// specify container implementation to systemd
@@ -206,6 +238,8 @@ func runArgsForNode(node *config.Node, clusterIPFamily config.ClusterIPFamily, n
 		"--volume", fmt.Sprintf("%s:/var:suid,exec,dev", varVolume),
 		// some k8s things want to read /lib/modules
 		"--volume", "/lib/modules:/lib/modules:ro",
+		"--volume", "/etc/hosts:/etc/hosts:ro",
+		"--network", "none", // don't attach to any networks
 		// propagate KIND_EXPERIMENTAL_CONTAINERD_SNAPSHOTTER to the entrypoint script
 		"-e", "KIND_EXPERIMENTAL_CONTAINERD_SNAPSHOTTER",
 		// enable /dev/fuse explicitly for fuse-overlayfs

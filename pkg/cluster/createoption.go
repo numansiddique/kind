@@ -124,3 +124,35 @@ func CreateWithDisplaySalutation(displaySalutation bool) CreateOption {
 		return nil
 	})
 }
+
+// CreateWithNodeImage overrides the image on all nodes in config
+// as an easy way to change the Kubernetes version
+func CreateWithJoinCluster(join bool) CreateOption {
+	return createOptionAdapter(func(o *internalcreate.ClusterOptions) error {
+		o.Join = join
+		return nil
+	})
+}
+
+// CreateWithNodeImage overrides the image on all nodes in config
+// as an easy way to change the Kubernetes version
+func CreateWithNodeIp(nodeIp string) CreateOption {
+	return createOptionAdapter(func(o *internalcreate.ClusterOptions) error {
+		o.NodeIp = nodeIp
+		return nil
+	})
+}
+
+func CreateWithNodeName(nodeName string) CreateOption {
+	return createOptionAdapter(func(o *internalcreate.ClusterOptions) error {
+		o.NodeName = nodeName
+		return nil
+	})
+}
+
+func CreateWithNodeMac(nodeMac string) CreateOption {
+	return createOptionAdapter(func(o *internalcreate.ClusterOptions) error {
+		o.NodeMac = nodeMac
+		return nil
+	})
+}

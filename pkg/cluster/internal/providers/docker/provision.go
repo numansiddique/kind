@@ -21,6 +21,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/kind/pkg/cluster/constants"
 	"sigs.k8s.io/kind/pkg/errors"
@@ -81,7 +82,12 @@ func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs
 	// plan normal nodes
 	for i, node := range cfg.Nodes {
 		node := node.DeepCopy() // copy so we can modify
-		name := names[i]
+		var name string
+		if node.Name == "" {
+			name = names[i]
+		} else {
+			name = node.Name
+		}
 
 		// fixup relative paths, docker can only handle absolute paths
 		for m := range node.ExtraMounts {
@@ -110,7 +116,7 @@ func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs
 				if err != nil {
 					return err
 				}
-				return createContainer(args)
+				return createContainerWithOvsPorts(args, name, node.Ip, node.Gw, node.Mac)
 			})
 		case config.WorkerRole:
 			createContainerFuncs = append(createContainerFuncs, func() error {
@@ -118,7 +124,7 @@ func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs
 				if err != nil {
 					return err
 				}
-				return createContainer(args)
+				return createContainerWithOvsPorts(args, name, node.Ip, node.Gw, node.Mac)
 			})
 		default:
 			return nil, errors.Errorf("unknown node role: %q", node.Role)
@@ -131,6 +137,31 @@ func createContainer(args []string) error {
 	if err := exec.Command("docker", args...).Run(); err != nil {
 		return errors.Wrap(err, "docker run error")
 	}
+
+	return nil
+}
+
+func createContainerWithOvsPorts(args []string, name string, nodeIp string, gwIp string, mac string) error {
+	fmt.Printf("Creating docker container for %s with args - [%s]\n", name, args)
+	if err := exec.Command("docker", args...).Run(); err != nil {
+		return errors.Wrap(err, "docker run error")
+	}
+
+	time.Sleep(3 * time.Second)
+	ovsArgs := []string{
+		"add-port",
+		"br-int",
+		"eth0",
+		name,
+		"--ipaddress=" + nodeIp + "/16",
+		"--gateway=" + gwIp,
+		"--macaddress=" + mac,
+	}
+
+	if err := exec.Command("ovs-docker", ovsArgs...).Run(); err != nil {
+		return errors.Wrap(err, "ovs-docker run error")
+	}
+
 	return nil
 }
 
@@ -158,7 +189,7 @@ func commonArgs(cluster string, cfg *config.Cluster, networkName string, nodeNam
 		// label the node with the cluster ID
 		"--label", fmt.Sprintf("%s=%s", clusterLabelKey, cluster),
 		// user a user defined docker network so we get embedded DNS
-		"--net", networkName,
+		//"--net", networkName,
 		// Docker supports the following restart modes:
 		// - no
 		// - on-failure[:max-retries]
@@ -243,6 +274,8 @@ func runArgsForNode(node *config.Node, clusterIPFamily config.ClusterIPFamily, n
 		"--volume", "/var",
 		// some k8s things want to read /lib/modules
 		"--volume", "/lib/modules:/lib/modules:ro",
+		"--volume", "/etc/hosts:/etc/hosts:ro",
+		"--network", "none", // don't attach to any networks
 		// propagate KIND_EXPERIMENTAL_CONTAINERD_SNAPSHOTTER to the entrypoint script
 		"-e", "KIND_EXPERIMENTAL_CONTAINERD_SNAPSHOTTER",
 		// enable /dev/fuse explicitly for fuse-overlayfs

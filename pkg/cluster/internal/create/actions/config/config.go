@@ -167,12 +167,12 @@ func getKubeadmConfig(cfg *config.Cluster, data kubeadm.ConfigData, node nodes.N
 	// we should really just streamline the bootstrap code and maintain
 	// this mapping ... something for the next major refactor
 	var configNode *config.Node
-	namer := common.MakeNodeNamer("")
+
 	for i := range cfg.Nodes {
 		n := &cfg.Nodes[i]
-		nodeSuffix := namer(string(n.Role))
-		if strings.HasSuffix(node.String(), nodeSuffix) {
+		if n.Name == node.String() {
 			configNode = n
+			break
 		}
 	}
 	if configNode == nil {
@@ -180,10 +180,8 @@ func getKubeadmConfig(cfg *config.Cluster, data kubeadm.ConfigData, node nodes.N
 	}
 
 	// get the node ip address
-	nodeAddress, nodeAddressIPv6, err := node.IP()
-	if err != nil {
-		return "", errors.Wrap(err, "failed to get IP for node")
-	}
+	nodeAddress, nodeAddressIPv6, _ := node.IP()
+	nodeAddress = configNode.Ip
 
 	data.NodeAddress = nodeAddress
 	// configure the right protocol addresses
@@ -265,4 +263,128 @@ func hashMapLabelsToCommaSeparatedLabels(labels map[string]string) string {
 		output += fmt.Sprintf("%s=%s,", key, value)
 	}
 	return strings.TrimSuffix(output, ",") // remove the last character (comma) in the output string
+}
+
+type JoinAction struct {
+	NodeName string
+}
+
+// NewAction returns a new action for creating the config files
+func NewJoinAction(nodeName string) actions.Action {
+	return &JoinAction{NodeName: nodeName}
+}
+
+// Execute runs the action
+func (a *JoinAction) Execute(ctx *actions.ActionContext) error {
+	ctx.Status.Start("Writing Join configuration 📜")
+	defer ctx.Status.End(false)
+
+	providerInfo, err := ctx.Provider.Info()
+	if err != nil {
+		return err
+	}
+
+	allNodes, err := ctx.Nodes()
+	if err != nil {
+		return err
+	}
+
+	joinNodes := []nodes.Node{}
+	for _, node := range allNodes {
+		if node.String() == a.NodeName {
+			joinNodes = append(joinNodes, node)
+		}
+	}
+
+	allNodes = joinNodes
+
+	controlPlaneEndpoint := net.JoinHostPort(ctx.Config.Name+"-control-plane", fmt.Sprintf("%d", common.APIServerInternalPort))
+
+	// create kubeadm init config
+	fns := []func() error{}
+
+	provider := fmt.Sprintf("%s", ctx.Provider)
+	configData := kubeadm.ConfigData{
+		NodeProvider:         provider,
+		ClusterName:          ctx.Config.Name,
+		ControlPlaneEndpoint: controlPlaneEndpoint,
+		APIBindPort:          common.APIServerInternalPort,
+		APIServerAddress:     ctx.Config.Networking.APIServerAddress,
+		Token:                kubeadm.Token,
+		PodSubnet:            ctx.Config.Networking.PodSubnet,
+		KubeProxyMode:        string(ctx.Config.Networking.KubeProxyMode),
+		ServiceSubnet:        ctx.Config.Networking.ServiceSubnet,
+		ControlPlane:         true,
+		IPFamily:             ctx.Config.Networking.IPFamily,
+		FeatureGates:         ctx.Config.FeatureGates,
+		RuntimeConfig:        ctx.Config.RuntimeConfig,
+		RootlessProvider:     providerInfo.Rootless,
+	}
+
+	kubeadmConfigPlusPatches := func(node nodes.Node, data kubeadm.ConfigData) func() error {
+		return func() error {
+			data.NodeName = node.String()
+			kubeadmConfig, err := getKubeadmConfig(ctx.Config, data, node, provider)
+			if err != nil {
+				// TODO(bentheelder): logging here
+				return errors.Wrap(err, "failed to generate kubeadm config content")
+			}
+
+			ctx.Logger.V(2).Infof("Using the following kubeadm config for node %s:\n%s", node.String(), kubeadmConfig)
+			return writeKubeadmConfig(kubeadmConfig, node)
+		}
+	}
+
+	// create the kubeadm join configuration for the kubernetes cluster nodes only
+	kubeNodes, err := nodeutils.InternalNodes(allNodes)
+	if err != nil {
+		return err
+	}
+
+	for _, node := range kubeNodes {
+		node := node             // capture loop variable
+		configData := configData // copy config data
+		fns = append(fns, kubeadmConfigPlusPatches(node, configData))
+	}
+
+	// Create the kubeadm config in all nodes concurrently
+	if err := errors.UntilErrorConcurrent(fns); err != nil {
+		return err
+	}
+
+	// if we have containerd config, patch all the nodes concurrently
+	if len(ctx.Config.ContainerdConfigPatches) > 0 || len(ctx.Config.ContainerdConfigPatchesJSON6902) > 0 {
+		fns := make([]func() error, len(kubeNodes))
+		for i, node := range kubeNodes {
+			node := node // capture loop variable
+			fns[i] = func() error {
+				// read and patch the config
+				const containerdConfigPath = "/etc/containerd/config.toml"
+				var buff bytes.Buffer
+				if err := node.Command("cat", containerdConfigPath).SetStdout(&buff).Run(); err != nil {
+					return errors.Wrap(err, "failed to read containerd config from node")
+				}
+				patched, err := patch.TOML(buff.String(), ctx.Config.ContainerdConfigPatches, ctx.Config.ContainerdConfigPatchesJSON6902)
+				if err != nil {
+					return errors.Wrap(err, "failed to patch containerd config")
+				}
+				if err := nodeutils.WriteFile(node, containerdConfigPath, patched); err != nil {
+					return errors.Wrap(err, "failed to write patched containerd config")
+				}
+				// restart containerd now that we've re-configured it
+				// skip if containerd is not running
+				if err := node.Command("bash", "-c", `! pgrep --exact containerd || systemctl restart containerd`).Run(); err != nil {
+					return errors.Wrap(err, "failed to restart containerd after patching config")
+				}
+				return nil
+			}
+		}
+		if err := errors.UntilErrorConcurrent(fns); err != nil {
+			return err
+		}
+	}
+
+	// mark success
+	ctx.Status.End(true)
+	return nil
 }
