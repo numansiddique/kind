@@ -40,6 +40,10 @@ type flagpole struct {
 	Retain     bool
 	Wait       time.Duration
 	Kubeconfig string
+	Join       bool
+	NodeIp     string
+	NodeMac    string
+	NodeName   string
 }
 
 // NewCommand returns a new cobra.Command for cluster creation
@@ -92,6 +96,26 @@ func NewCommand(logger log.Logger, streams cmd.IOStreams) *cobra.Command {
 		"",
 		"sets kubeconfig path instead of $KUBECONFIG or $HOME/.kube/config",
 	)
+	cmd.Flags().BoolVar(
+		&flags.Join,
+		"join",
+		false,
+		"joins an existing cluster")
+	cmd.Flags().StringVar(
+		&flags.NodeIp,
+		"nodeip",
+		"10.82.0.3",
+		"IP of the first node")
+	cmd.Flags().StringVar(
+		&flags.NodeMac,
+		"nodemac",
+		"ae:01:00:00:00:02",
+		"Node mac")
+	cmd.Flags().StringVar(
+		&flags.NodeName,
+		"nodename",
+		"ovn-worker3",
+		"Node name if joining the cluster")
 	return cmd
 }
 
@@ -117,6 +141,10 @@ func runE(logger log.Logger, streams cmd.IOStreams, flags *flagpole) error {
 		cluster.CreateWithKubeconfigPath(flags.Kubeconfig),
 		cluster.CreateWithDisplayUsage(true),
 		cluster.CreateWithDisplaySalutation(true),
+		cluster.CreateWithJoinCluster(flags.Join),
+		cluster.CreateWithNodeIp(flags.NodeIp),
+		cluster.CreateWithNodeMac(flags.NodeMac),
+		cluster.CreateWithNodeName(flags.NodeName),
 	); err != nil {
 		return errors.Wrap(err, "failed to create cluster")
 	}
