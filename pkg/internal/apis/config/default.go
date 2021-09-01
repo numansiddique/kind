@@ -101,4 +101,8 @@ func SetDefaultsNode(obj *Node) {
 	if obj.Role == "" {
 		obj.Role = ControlPlaneRole
 	}
+
+	obj.Ip = ""
+	obj.Gw = ""
+	obj.Name = ""
 }
